@@ -1,65 +1,76 @@
 #!/bin/bash
 
-REGION="ap-southeast-1"
-REDIS_ID="your-redis-cluster"
+REGION="cn-hangzhou"     # 修改区域
+REDIS_ID="r-xxxxx"       # Redis实例ID
 
-# 要添加的IP
 IPS=(
     "1.1.1.1/32"
     "2.2.2.2/32"
     "3.3.3.3/32"
 )
 
-TARGET_SG_NAME="dddd"
+TARGET_SG_NAME="xr_dms_sg"
+REDIS_PORT=6379
 
-# 获取redis安全组
-REDIS_SGS=$(aws elasticache describe-cache-clusters \
-    --cache-cluster-id "${REDIS_ID}" \
+# 获取Redis绑定的安全组
+SG_IDS=$(aws elasticache describe-cache-clusters \
+    --cache-cluster-id "$REDIS_ID" \
     --show-cache-node-info \
-    --region "${REGION}" \
     --query 'CacheClusters[0].SecurityGroups[*].SecurityGroupId' \
     --output text)
 
-if [ -z "$REDIS_SGS" ]; then
+if [ -z "$SG_IDS" ] || [ "$SG_IDS" = "None" ]; then
     echo "未获取到Redis安全组"
     exit 1
 fi
 
-echo "Redis绑定安全组: $REDIS_SGS"
+echo "Redis绑定安全组:"
+echo "$SG_IDS"
 
-# 查找 dddd
-TARGET_SG_ID=$(aws ec2 describe-security-groups \
-    --region "${REGION}" \
-    --filters "Name=group-name,Values=${TARGET_SG_NAME}" \
-    --query 'SecurityGroups[0].GroupId' \
-    --output text 2>/dev/null)
+TARGET_SG_ID=""
 
-if [ "$TARGET_SG_ID" != "None" ] && [ -n "$TARGET_SG_ID" ]; then
-    SG_ID=$TARGET_SG_ID
-    echo "找到安全组 ${TARGET_SG_NAME}: ${SG_ID}"
+for SG_ID in $SG_IDS
+do
+    SG_NAME=$(aws ec2 describe-security-groups \
+        --group-ids "$SG_ID" \
+        --query 'SecurityGroups[0].GroupName' \
+        --output text)
+
+    echo "$SG_ID -> $SG_NAME"
+
+    if [ "$SG_NAME" = "$TARGET_SG_NAME" ]; then
+        TARGET_SG_ID="$SG_ID"
+        break
+    fi
+done
+
+# 如果不存在，则取第一个安全组
+if [ -z "$TARGET_SG_ID" ]; then
+    TARGET_SG_ID=$(echo "$SG_IDS" | awk '{print $1}')
+    echo "未发现 $TARGET_SG_NAME"
+    echo "使用第一个安全组: $TARGET_SG_ID"
 else
-    SG_ID=$(echo "$REDIS_SGS" | awk '{print $1}')
-    echo "未找到 ${TARGET_SG_NAME}，使用Redis第一个安全组: ${SG_ID}"
+    echo "发现目标安全组: $TARGET_SG_ID"
 fi
 
+# 添加IP
 for IP in "${IPS[@]}"
 do
-    echo "添加 ${IP}"
+    echo "添加: $IP"
 
     aws ec2 authorize-security-group-ingress \
-        --region "${REGION}" \
-        --group-id "${SG_ID}" \
+        --group-id "$TARGET_SG_ID" \
         --protocol tcp \
-        --port 6379 \
-        --cidr "${IP}" \
-        2>/tmp/err.log
+        --port "$REDIS_PORT" \
+        --cidr "$IP" \
+        >/tmp/sg.out 2>/tmp/sg.err
 
     if [ $? -eq 0 ]; then
-        echo "成功: ${IP}"
-    elif grep -q "InvalidPermission.Duplicate" /tmp/err.log; then
-        echo "已存在: ${IP}"
+        echo "成功: $IP"
+    elif grep -q "Duplicate" /tmp/sg.err; then
+        echo "已存在: $IP"
     else
-        echo "失败: ${IP}"
-        cat /tmp/err.log
+        echo "失败: $IP"
+        cat /tmp/sg.err
     fi
 done
