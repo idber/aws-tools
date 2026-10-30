@@ -1,76 +1,119 @@
 #!/bin/bash
 
-REGION="cn-hangzhou"     # 修改区域
-REDIS_ID="r-xxxxx"       # Redis实例ID
+# =========================
+# 配置区
+# =========================
+
+REDIS_NAME="$1"
+echo "$REDIS_NAME"
+
+DESC="db-"
 
 IPS=(
-    "1.1.1.1/32"
-    "2.2.2.2/32"
-    "3.3.3.3/32"
+    # 1.1.1.1/32
+    # 2.2.2.2/32
 )
 
-TARGET_SG_NAME="xr_dms_sg"
-REDIS_PORT=6379
+PORTS=(
+    6379
+)
 
-# 获取Redis绑定的安全组
+# =========================
+# 获取Redis关联安全组
+# =========================
+
 SG_IDS=$(aws elasticache describe-cache-clusters \
-    --cache-cluster-id "$REDIS_ID" \
-    --show-cache-node-info \
-    --query 'CacheClusters[0].SecurityGroups[*].SecurityGroupId' \
-    --output text)
+  --cache-cluster-id "$REDIS_NAME" \
+  --show-cache-node-info \
+  --query "CacheClusters[0].SecurityGroups[*].SecurityGroupId" \
+  --output text)
 
-if [ -z "$SG_IDS" ] || [ "$SG_IDS" = "None" ]; then
-    echo "未获取到Redis安全组"
+if [ -z "$SG_IDS" ]; then
+    echo "Redis not found: $REDIS_NAME"
     exit 1
 fi
 
-echo "Redis绑定安全组:"
-echo "$SG_IDS"
+TARGET_SGS=()
 
-TARGET_SG_ID=""
-
-for SG_ID in $SG_IDS
+for SG in $SG_IDS
 do
     SG_NAME=$(aws ec2 describe-security-groups \
-        --group-ids "$SG_ID" \
-        --query 'SecurityGroups[0].GroupName' \
-        --output text)
+      --group-ids "$SG" \
+      --query "SecurityGroups[0].GroupName" \
+      --output text)
 
-    echo "$SG_ID -> $SG_NAME"
+    echo "Found SG: $SG ($SG_NAME)"
 
-    if [ "$SG_NAME" = "$TARGET_SG_NAME" ]; then
-        TARGET_SG_ID="$SG_ID"
-        break
+    if [[ "$SG_NAME" == *"-db"* ]]; then
+        TARGET_SGS+=("$SG")
     fi
 done
 
-# 如果不存在，则取第一个安全组
-if [ -z "$TARGET_SG_ID" ]; then
-    TARGET_SG_ID=$(echo "$SG_IDS" | awk '{print $1}')
-    echo "未发现 $TARGET_SG_NAME"
-    echo "使用第一个安全组: $TARGET_SG_ID"
-else
-    echo "发现目标安全组: $TARGET_SG_ID"
+if [ ${#TARGET_SGS[@]} -eq 0 ]; then
+    FIRST_SG=$(echo "$SG_IDS" | awk '{print $1}')
+    TARGET_SGS=("$FIRST_SG")
+
+    echo "No '-db' SG found."
+    echo "Using first SG: $FIRST_SG"
 fi
 
-# 添加IP
-for IP in "${IPS[@]}"
+echo "===================================="
+echo "Redis: $REDIS_NAME"
+echo "===================================="
+
+# =========================
+# 开始处理
+# =========================
+
+for SG in "${TARGET_SGS[@]}"
 do
-    echo "添加: $IP"
+    echo ""
+    echo "Processing Security Group: $SG"
 
-    aws ec2 authorize-security-group-ingress \
-        --group-id "$TARGET_SG_ID" \
-        --protocol tcp \
-        --port "$REDIS_PORT" \
-        --cidr "$IP" \
-        >/tmp/sg.out 2>/tmp/sg.err
+    for PORT in "${PORTS[@]}"
+    do
+        for IP in "${IPS[@]}"
+        do
 
-    if [ $? -eq 0 ]; then
-        echo "成功: $IP"
-    elif grep -q "Duplicate" /tmp/sg.err; then
-        echo "已存在: $IP"
-    else
-        echo "失败: $IP"
-        cat /tmp/sg.err
-    fi
+            EXISTS=$(aws ec2 describe-security-groups \
+              --group-ids "$SG" \
+              --query "SecurityGroups[0].IpPermissions[?FromPort==\`$PORT\` && ToPort==\`$PORT\`].IpRanges[].CidrIp" \
+              --output text | grep -w "$IP")
+
+            if [ -n "$EXISTS" ]; then
+                echo "[SKIP] $IP Port:$PORT already exists"
+                continue
+            fi
+
+            echo "[ADD ] $IP Port:$PORT"
+
+            aws ec2 authorize-security-group-ingress \
+              --group-id "$SG" \
+              --ip-permissions "[
+                {
+                  \"IpProtocol\":\"tcp\",
+                  \"FromPort\":$PORT,
+                  \"ToPort\":$PORT,
+                  \"IpRanges\":[
+                    {
+                      \"CidrIp\":\"$IP\",
+                      \"Description\":\"$DESC\"
+                    }
+                  ]
+                }
+              ]"
+
+            if [ $? -eq 0 ]; then
+                echo "[ OK ] Added"
+            else
+                echo "[FAIL] Add Failed"
+            fi
+
+        done
+    done
 done
+
+echo ""
+echo "===================================="
+echo "Finished"
+echo "===================================="
