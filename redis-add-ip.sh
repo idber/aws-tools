@@ -5,7 +5,13 @@
 # =========================
 
 REDIS_NAME="$1"
-echo "$REDIS_NAME"
+
+if [ -z "$REDIS_NAME" ]; then
+    echo "Usage: $0 <redis-cluster-name>"
+    exit 1
+fi
+
+echo "Redis Cluster: $REDIS_NAME"
 
 DESC="db-"
 
@@ -23,24 +29,27 @@ PORTS=(
 # =========================
 
 SG_IDS=$(aws elasticache describe-cache-clusters \
-  --cache-cluster-id "$REDIS_NAME" \
-  --show-cache-node-info \
-  --query "CacheClusters[0].SecurityGroups[*].SecurityGroupId" \
-  --output text)
+    --cache-cluster-id "$REDIS_NAME" \
+    --query "CacheClusters[0].SecurityGroups[*].SecurityGroupId" \
+    --output text 2>/dev/null)
 
-if [ -z "$SG_IDS" ]; then
-    echo "Redis not found: $REDIS_NAME"
+if [ $? -ne 0 ] || [ -z "$SG_IDS" ] || [ "$SG_IDS" = "None" ]; then
+    echo "[ERROR] Redis Cluster not found: $REDIS_NAME"
     exit 1
 fi
 
 TARGET_SGS=()
 
+# =========================
+# 遍历安全组
+# =========================
+
 for SG in $SG_IDS
 do
     SG_NAME=$(aws ec2 describe-security-groups \
-      --group-ids "$SG" \
-      --query "SecurityGroups[0].GroupName" \
-      --output text)
+        --group-ids "$SG" \
+        --query "SecurityGroups[0].GroupName" \
+        --output text)
 
     echo "Found SG: $SG ($SG_NAME)"
 
@@ -48,6 +57,10 @@ do
         TARGET_SGS+=("$SG")
     fi
 done
+
+# =========================
+# 如果没找到-db安全组
+# =========================
 
 if [ ${#TARGET_SGS[@]} -eq 0 ]; then
     FIRST_SG=$(echo "$SG_IDS" | awk '{print $1}')
@@ -59,6 +72,8 @@ fi
 
 echo "===================================="
 echo "Redis: $REDIS_NAME"
+echo "Target Security Groups:"
+printf '%s\n' "${TARGET_SGS[@]}"
 echo "===================================="
 
 # =========================
@@ -67,18 +82,17 @@ echo "===================================="
 
 for SG in "${TARGET_SGS[@]}"
 do
-    echo ""
+    echo
     echo "Processing Security Group: $SG"
 
     for PORT in "${PORTS[@]}"
     do
         for IP in "${IPS[@]}"
         do
-
             EXISTS=$(aws ec2 describe-security-groups \
-              --group-ids "$SG" \
-              --query "SecurityGroups[0].IpPermissions[?FromPort==\`$PORT\` && ToPort==\`$PORT\`].IpRanges[].CidrIp" \
-              --output text | grep -w "$IP")
+                --group-ids "$SG" \
+                --query "SecurityGroups[0].IpPermissions[?FromPort==\`$PORT\` && ToPort==\`$PORT\`].IpRanges[].CidrIp" \
+                --output text | tr '\t' '\n' | grep -Fx "$IP")
 
             if [ -n "$EXISTS" ]; then
                 echo "[SKIP] $IP Port:$PORT already exists"
@@ -88,32 +102,31 @@ do
             echo "[ADD ] $IP Port:$PORT"
 
             aws ec2 authorize-security-group-ingress \
-              --group-id "$SG" \
-              --ip-permissions "[
+                --group-id "$SG" \
+                --ip-permissions "[
                 {
-                  \"IpProtocol\":\"tcp\",
-                  \"FromPort\":$PORT,
-                  \"ToPort\":$PORT,
-                  \"IpRanges\":[
+                    \"IpProtocol\":\"tcp\",
+                    \"FromPort\":$PORT,
+                    \"ToPort\":$PORT,
+                    \"IpRanges\":[
                     {
-                      \"CidrIp\":\"$IP\",
-                      \"Description\":\"$DESC\"
+                        \"CidrIp\":\"$IP\",
+                        \"Description\":\"$DESC\"
                     }
-                  ]
+                    ]
                 }
-              ]"
+                ]"
 
             if [ $? -eq 0 ]; then
                 echo "[ OK ] Added"
             else
                 echo "[FAIL] Add Failed"
             fi
-
         done
     done
 done
 
-echo ""
+echo
 echo "===================================="
 echo "Finished"
 echo "===================================="
