@@ -32,6 +32,17 @@ PORTS=(
 # 获取Redis关联安全组
 # =========================
 
+CACHE_CLUSTER=$(aws elasticache describe-replication-groups \
+    --replication-group-id "$REDIS_NAME" \
+    --query "ReplicationGroups[0].MemberClusters[0]" \
+    --output text 2>/dev/null)
+
+if [ -n "$CACHE_CLUSTER" ] && [ "$CACHE_CLUSTER" != "None" ]; then
+    REDIS_NAME="$CACHE_CLUSTER"
+    echo "Detected Replication Group."
+    echo "Using Member Cluster: $REDIS_NAME"
+fi
+
 SG_IDS=$(aws elasticache describe-cache-clusters \
     --cache-cluster-id "$REDIS_NAME" \
     --query "CacheClusters[0].SecurityGroups[*].SecurityGroupId" \
