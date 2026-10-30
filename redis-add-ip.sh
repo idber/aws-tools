@@ -4,14 +4,18 @@
 # 配置区
 # =========================
 
-REDIS_NAME="$1"
+REDIS_ARN="$1"
 
-if [ -z "$REDIS_NAME" ]; then
-    echo "Usage: $0 <redis-cluster-name>"
+if [ -z "$REDIS_ARN" ]; then
+    echo "Usage:"
+    echo "$0 <redis-cluster-arn>"
     exit 1
 fi
 
-echo "Redis Cluster: $REDIS_NAME"
+REDIS_NAME=$(echo "$REDIS_ARN" | awk -F: '{print $NF}')
+
+echo "Redis ARN  : $REDIS_ARN"
+echo "Cluster ID : $REDIS_NAME"
 
 DESC="db-"
 
